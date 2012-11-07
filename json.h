@@ -1,108 +1,57 @@
-/*
- * A primitive framework for parsing JSON.
- * To use:
- *
- * Step 1:
- *  Create an object of a some type Lookable, that allows you to read
- *  content one byte at a time.  The type needs, two methods,
- *  "int sgetc()" , and "int sbumpc()". The sgetc() method peeks at the next
- *  byte in the stream and returns it. The "sbumpc()" method consumes the
- *  next byte in the stream and returns it. This interface is compatbile with
- *  std::streambuf.
- *
- * Step 2:
- *  Call one of the parse functions . The JSON stream in Lookable
- *  must match the type inferred by the function. Eg, if you call "parseInt()",
- *  then the JSON stream must present an integer next.
- *  The parse functions are:
- *      JSON::parseString()
- *      JSON::parseFloat()
- *      JSON::parseInt()
- *      JSON::parseArray()
- *      JSON::parseObject()
- *
- *  The first argument is a reference to the Lookable above.
- *
- *  The parsers for scalar types (string, number) take a reference to a similar
- *  C++ type (eg, parseString(std::string &) that gets populated as their second
- *  argument.
- *
- *  The methods for the non-scalar types (arrays and objects) take a second argument
- *  of a further templated type: The objects of these templated types are called with
- *  either the name of the field of the object to be parsed, or the index into the
- *  array being parsed. The user can provide a function or a functor object to 
- *  satsfy the requirements.
- * 
- *
- * Notes:
- *  JSON::peekType() allows you to get some details of the type of the next object
- *  in the stream, for those cases where the context alone is not enough to 
- *  infer type
- *
- *  "JSON::parseValue()" will skip over any content you don't need to process. For
- *  example, if you are presented with a field of an object in "parseField()"
- *  with a name you don't recognise, you can simply call "parseValue()" to ignore the
- *  data for that field.
- */
-
+// A pretty distilled JSON parser.
 #ifndef PME_JSON_H
 #define PME_JSON_H
 
-#include <iostream>
+#include <cctype>
+#include <cmath>
+#include <istream>
 #include <sstream>
-#include <string>
-#include <math.h>
-#include "exception.h"
+
 namespace JSON {
 
-enum Type {
-    Array,
-    Boolean,
-    Null,
-    Number,
-    Object,
-    String,
-    None
+class InvalidJSON : public std::exception {
+    std::string err;
+public:
+    const char *what() const throw() { return err.c_str(); }
+    InvalidJSON(const std::string &err_) throw() : err(err_) {}
+    ~InvalidJSON() throw() {};
 };
 
-template <typename Lookable, typename Context> void parseObject(Lookable &l, Context &ctx);
+enum Type { Array, Boolean, Null, Number, Object, String, Eof, JSONTypeCount };
 
-// Thrown for ill-formed JSON content.
-class InvalidJSON : public Exception { };
-
-template <typename Lookable> char
-peekChar(Lookable &l)
+static inline int
+skipSpace(std::istream &l)
 {
-    int rc = l.sgetc();
-    if (rc == Lookable::traits_type::eof()) {
-        InvalidJSON fmt;
-        fmt << "I/O error reading JSON";
-        throw fmt;
+    while (!l.eof() && isspace(l.peek()))
+        l.ignore();
+    return l.eof() ? -1 : l.peek();
+}
+
+static inline char
+expectAfterSpace(std::istream &l, char expected)
+{
+    char c = skipSpace(l);
+    if (c != expected)
+        throw InvalidJSON(std::string("expected '") + expected + "', got '" + c + "'");
+    l.ignore();
+    return c;
+}
+
+static inline void
+skipText(std::istream &l, const char *text)
+{
+    for (size_t i = 0; text[i]; ++i) {
+        char c;
+        l.get(c);
+        if (c != text[i])
+            throw InvalidJSON(std::string("expected '") + text +  "'");
     }
-    return rc;
 }
 
-template <typename Lookable> char
-readChar(Lookable &l)
+static inline Type
+peekType(std::istream &l)
 {
-    char c = peekChar();
-    l.sbumpc();
-    return c;
-}
-
-template <typename Lookable> char
-skipspace(Lookable &l)
-{
-    char c;
-    while (isspace(c = peekChar(l)))
-        c = readChar(l);
-    return c;
-}
-
-template <typename Lookable> Type
-peekType(Lookable &l)
-{
-    char c = skipspace(l);
+    char c = skipSpace(l);
     switch (c) {
         case '{': return Object;
         case '[': return Array;
@@ -110,292 +59,213 @@ peekType(Lookable &l)
         case '-': return Number;
         case 't' : case 'f': return Boolean;
         case 'n' : return Null;
+        case -1: return Eof;
         default: {
             if (c >= '0' && c <= '9')
                 return Number;
-            InvalidJSON fmt;
-            fmt << "unexpected token '" << c << "'";
-            throw fmt;
+            throw InvalidJSON(std::string("unexpected token '") + char(c) + "' at start of JSON object");
         }
     }
 }
 
-template <typename Lookable> void
-skipText(Lookable &l, const char *text)
+template <typename Context> void parseObject(std::istream &l, Context &&ctx);
+template <typename Context> void parseArray(std::istream &l, Context &&ctx);
+
+template <typename I> I
+parseInt(std::istream &l)
 {
-    for (size_t i = 0; text[i]; ++i) {
-        char c = readChar(l);
-        if (c != text[i]) {
-            InvalidJSON fmt;
-            fmt << "expected '" << text <<  "'";
-            throw fmt;
+    int sign;
+    char c;
+    if (skipSpace(l) == '-') {
+        sign = -1;
+        l.ignore();
+    } else {
+        sign = 1;
+    }
+    I rv = 0;
+    if (l.peek() == '0') {
+        l.ignore(); // leading zero.
+    } else if (isdigit(l.peek())) {
+        while (isdigit(c = l.peek())) {
+            rv = rv * 10 + c - '0';
+            l.ignore();
+        }
+    } else {
+        throw InvalidJSON("expected digit");
+    }
+    return rv * sign;
+}
+
+/*
+ * Note that you can use parseInt instead when you know the value will be
+ * integral.
+ */
+
+template <typename FloatType> static inline FloatType
+parseFloat(std::istream &l)
+{
+    FloatType rv = parseInt<FloatType>(l);
+    if (l.peek() == '.') {
+        l.ignore();
+        FloatType scale = rv < 0 ? -1 : 1;
+        char c;
+        while (isdigit(c = l.peek())) {
+            l.ignore();
+            scale /= 10;
+            rv = rv + scale * (c - '0');
         }
     }
-}
-
-template <typename Lookable> void
-parseBoolean(Lookable &l, bool &in)
-{
-    char c = skipspace(l);
-    static const char trueText[] = "true";
-    static const char falseText[] = "false";
-    const char *text;
-
-    bool value;
-    switch (c) {
-        case 't': text = trueText, value = true; break;
-        case 'f': text = falseText, value = false; break;
-        default: {
-            InvalidJSON fmt;
-            fmt << "expected 'true' or 'false'";
-            throw fmt;
+    if (l.peek() == 'e' || l.peek() == 'E') {
+        l.ignore();
+        int sign;
+        char c = l.peek();
+        if (c == '+' || c == '-') {
+            sign = c == '+' ? 1 : -1;
+            l.ignore();
+            c = l.peek();
+        } else if (isdigit(c)) {
+            sign = 1;
+        } else {
+            throw InvalidJSON("expected sign or numeric after exponent");
         }
+        auto exponent = sign * parseInt<int>(l);
+        rv *= std::pow(10.0, exponent);
     }
-    skipText(l, text);
-    in = value;
+    return rv;
 }
 
-template <typename Lookable> void
-parseNull(Lookable &l)
-{
-    skipspace(l);
-    skipText(l, "null");
-}
+template <typename Integer> Integer parseNumber(std::istream &i) { return parseInt<long double>(i); }
+template <> double parseNumber<double> (std::istream &i) { return parseFloat<double>(i); }
+template <> float parseNumber<float> (std::istream &i) { return parseFloat<float>(i); }
+template <> long double parseNumber<long double> (std::istream &i) { return parseFloat<long double>(i); }
 
-template <typename Lookable> void
-parseString(Lookable &l, std::string &in)
+static std::string
+parseString(std::istream &l)
 {
-    char c = skipspace(l);
-    if (c != '"') {
-        InvalidJSON fmt;
-        fmt << "expected start of string, got " << c;
-        throw fmt;
-    }
-    c = readChar(l);
-    std::stringstream strm;
+    expectAfterSpace(l, '"');
+    std::stringstream rv;
     for (;;) {
-        c = readChar(l);
+        char c;
+        l.get(c);
         if (c == '"')
             break;
         if (c == '\\')
-            c = readChar(l);
-        strm <<  c;
+            l.get(c);
+        rv <<  c;
     }
-    in = strm.str();
+    return rv.str();
 }
 
-template <typename Lookable, typename I> void
-parseInt(Lookable &l, I &in)
+static inline bool
+parseBoolean(std::istream &l)
 {
-    int sign = 1;
-    char c = peekChar(l);
-    if (c == ' ') { // skip over white space
-        readChar(l);
-        c = peekChar(l);
+    char c = skipSpace(l);
+    switch (c) {
+        case 't': skipText(l, "true"); return true;
+        case 'f': skipText(l, "false"); return false;
+        default: throw InvalidJSON("expected 'true' or 'false'");
     }
-    if (c == '-') {
-        readChar(l);
-        c = peekChar(l);
-        sign = -1;
-    }
-    for (in = 0; isdigit(c); c = peekChar(l)) {
-        c = readChar(l);
-        in *= 10;
-        in += c - '0';
-    };
-    in *= sign;
 }
 
-template <typename Lookable> void
-parseFloat(Lookable &l, double &in)
+static inline void
+parseNull(std::istream &l)
 {
-    long intPart;
-    parseInt(l, intPart);
-    in = intPart;
-    char c = peekChar(l);
-    if (c == '.') {
-        c = readChar(l);
-        int frac = 0;
-        int scale = 1;
-        while (isdigit(c = peekChar(l))) {
-            c = readChar(l);
-            frac = frac * 10 + c - '0';
-            scale *= 10;
-        }
-        in += double(frac) / scale * (in < 0 ? - 1 : 1);
-    }
-    if (c == 'e' || c == 'E') {
-        c = readChar(l);
-        int sign;
-        c = peekChar(l);
-        if (c == '+' || c == '-') {
-            sign = c;
-            readChar(l);
-            c = peekChar(l);
-        } else if (isdigit(c)) {
-            sign = '+';
-        } else {
-            InvalidJSON fmt;
-            fmt << "expected sign or numeric after exponent";
-            throw fmt;
-        }
-        int exponent;
-        parseInt(l, exponent);
-        switch (sign) {
-            case '+': in *= pow(10.0, exponent); break;
-            case '-': in /= pow(10.0, exponent); break;
-        }
-    }
+    skipSpace(l);
+    skipText(l, "null");
 }
 
-template <typename Lookable> void
-parseValue(Lookable &l)
+static inline void // Parse any value but discard the result.
+parseValue(std::istream &l)
 {
     switch (peekType(l)) {
-        case None: {
-            InvalidJSON fmt;
-            fmt << "unknown type for JSON construct";
-            throw fmt;
-        }
-        case Object: {
-            static std::function<void(Lookable &, std::string)> skipField = 
-                [](Lookable &l, std::string) -> void { parseValue(l); };
-            parseObject(l, skipField);
-            break;
-        }
-        case String: {
-            std::string str;
-            parseString(l, str);
-            break;
-        }
-        case Array: {
-            static std::function<void(Lookable &, size_t)> skipElement = 
-                [](Lookable &l, size_t) -> void { parseValue(l); };
-            parseArray(l, skipElement);
-            break;
-        }
-        case Number: {
-            double d;
-            parseFloat(l, d);
-            break;
-        }
-        case Boolean: {
-            bool b;
-            parseBoolean(l, b);
-            break;
-        }
-        case Null: {
-            parseNull(l);
-            break;
-        }
+        case Array: parseArray(l, [](std::istream &l) -> void { parseValue(l); }); break;
+        case Boolean: parseBoolean(l); break;
+        case Null: parseNull(l); break;
+        case Number: parseNumber<float>(l); break;
+        case Object: parseObject(l, [](std::istream &l, std::string) -> void { parseValue(l); }); break;
+        case String: parseString(l); break;
+        default: throw InvalidJSON("unknown type for JSON construct");
     }
 }
 
-template <typename Lookable, typename Context> void
-parseObject(Lookable &l, Context &ctx)
+template <typename Context> void
+parseObject(std::istream &l, Context &&ctx)
 {
-    skipspace(l);
-    char c;
-    c = readChar(l);
-    if (c != '{') {
-        InvalidJSON fmt;
-        fmt << "expected '{', got '" << c << "'";
-        throw fmt;
-    }
+    expectAfterSpace(l, '{');
     for (;;) {
         std::string fieldName;
-        switch (c = skipspace(l)) {
+        char c;
+        switch (c = skipSpace(l)) {
             case '"': // Name of next field.
-                parseString(l, fieldName);
-                skipspace(l);
-                c = readChar(l);
-                if (c != ':') {
-                    InvalidJSON fmt;
-                    fmt << "expected ':', got '" << char(c) << "'";
-                    throw fmt;
-                }
+                fieldName = parseString(l);
+                expectAfterSpace(l, ':');
                 ctx(l, fieldName);
                 break;
             case '}': // End of this object
-                readChar(l);
+                l.ignore();
                 return;
             case ',': // Separator to next field
-                readChar(l);
+                l.ignore();
                 break;
             default: {
-                InvalidJSON fmt;
-                fmt << "unexpected character '" << char(c) << "' parsing object";
-                throw fmt;
+                throw InvalidJSON(std::string("unexpected character '") + char(c) + "' parsing object");
             }
         }
     }
 }
 
-template <class Lookable, typename Context> void
-parseArray(Lookable &l, Context &ctx)
+template <typename Context> void
+parseArray(std::istream &l, Context &&ctx)
 {
-    char c = skipspace(l);
-    if (c != '[') {
-        InvalidJSON fmt;
-        fmt << "expected '['";
-        throw fmt;
-    }
-    c = readChar(l);
-    if ((c = skipspace(l)) == ']') {
-        readChar(l);
+    expectAfterSpace(l, '[');
+    char c;
+    if ((c = skipSpace(l)) == ']') {
+        l.ignore();
         return; // empty array
     }
     for (size_t i = 0;; i++) {
-        skipspace(l);
-        ctx(l, i);
-        skipspace(l);
-        c = readChar(l);
+        skipSpace(l);
+        ctx(l);
+        c = skipSpace(l);
         switch (c) {
             case ']':
+                l.ignore();
                 return;
             case ',':
+                l.ignore();
                 break;
-            default: {
-                InvalidJSON fmt;
-                fmt << "expected ']' or ',', got '" << c << "'";
-                throw fmt;
-            }
+            default:
+                throw InvalidJSON(std::string("expected ']' or ',', got '") + c + "'");
         }
     }
 }
 
-template <class Looker
-         , typename Element
-         , typename Parser = void (*)(Looker &, Element &)
-         , typename Container = std::vector<Element> >
-struct ElementsOf {
-    Parser p;
-    Container *vec;
-public:
-    void operator() (Looker &l, size_t) const {
-        vec->resize(vec->size() + 1);
-        p(l, vec->back());
+std::string escape(std::string i)
+{
+    std::ostringstream o;
+    for (auto c : i) {
+        if (c == '\"' || c == '\\')
+            o << '\\' << c;
+        else if (unsigned(c) < 32 || unsigned(c) >= 0x7f && unsigned(c) < 0xa0)
+            o << "\\u" << std::hex << unsigned(c);
+        else
+            o << c;
     }
-    ElementsOf(Parser p_, Container &vec_) : p(p_), vec(&vec_) {}
-};
+    return o.str();
+}
+}
+
 
 static inline std::ostream &
-operator<<(std::ostream &os, const Type &t)
+operator<<(std::ostream &os, const JSON::Type &t)
 {
     switch (t) {
-        case Array: os << "Array"; break;
-        case Object: os << "Object"; break;
-        case Number: os << "Number"; break;
-        case String: os << "String"; break;
-        case NOTYPE:
-        default: {
-            Exception e;
-            e << "inavlid type";
-            throw e;
-        }
+        case JSON::Array: os << "Array"; break;
+        case JSON::Number: os << "Number"; break;
+        case JSON::Object: os << "Object"; break;
+        case JSON::String: os << "String"; break;
+        default: throw JSON::InvalidJSON("not a JSON type");
     }
     return os;
 }
-}
-
 #endif
