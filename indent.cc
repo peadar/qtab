@@ -1,44 +1,14 @@
 #include <json.h>
+#include <cstring>
 #include <iostream>
 
 using namespace JSON;
 
 const char *pad(size_t indent) {
-    static const char spaces[] =
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    "
-        "                    ";
-    indent = std::min(4 * indent, sizeof spaces - 1);
-    return spaces + sizeof spaces  - indent - 1;
+    static size_t maxindent = 8192;
+    static const char *spaces = strdup(std::string(maxindent, ' ').c_str());
+    indent = std::min(4 * indent, maxindent);
+    return spaces + maxindent - indent;
 }
 
 template <typename numtype> static void pretty(std::istream &i, std::ostream &o, size_t indent);
