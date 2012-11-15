@@ -6,6 +6,7 @@
 #include <cmath>
 #include <istream>
 #include <sstream>
+#include <iomanip>
 
 namespace JSON {
 
@@ -139,21 +140,98 @@ template <> double parseNumber<double> (std::istream &i) { return parseFloat<dou
 template <> float parseNumber<float> (std::istream &i) { return parseFloat<float>(i); }
 template <> long double parseNumber<long double> (std::istream &i) { return parseFloat<long double>(i); }
 
+static inline int hexval(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    throw InvalidJSON(std::string("not a hex char: " + c));
+}
+
+struct UTF8 {
+    unsigned long code;
+    UTF8(unsigned long code_) : code(code_) {}
+};
+
+std::ostream &
+operator<<(std::ostream &os, const UTF8 &utf)
+{
+    if ((utf.code & 0x7f) == utf.code) {
+        os.put(char(utf.code));
+        return os;
+    }
+    uint8_t prefixBits = 0x80; // start with 100xxxxx
+    int byteCount = 0; // one less than entire bytecount of encoding.
+    unsigned long value = utf.code;
+
+    for (size_t mask = 0x7ff;; mask = mask << 5 | 0x1f) {
+        prefixBits = prefixBits >> 1 | 0x80;
+        byteCount++;
+        if ((value & mask) == value)
+            break;
+    }
+    os << char(value >> 6 * byteCount | prefixBits);
+    while (byteCount--)
+        os.put(char((value >> 6 * byteCount  & ~0xc0) | 0x80));
+    return os;
+}
+
 static std::string
 parseString(std::istream &l)
 {
     expectAfterSpace(l, '"');
-    std::stringstream rv;
+    std::ostringstream rv;
     for (;;) {
         char c;
         l.get(c);
-        if (c == '"')
-            break;
-        if (c == '\\')
-            l.get(c);
-        rv <<  c;
+        switch (c) {
+            case '"':
+                return rv.str();
+            case '\\':
+                l.get(c);
+                switch (c) {
+                    case '"':
+                    case '\\':
+                    case '/':
+                        rv << c;
+                        break;
+                    case 'b':
+                        rv << '\b';
+                        break;
+                    case 'f':
+                        rv << '\f';
+                        break;
+                    case 'n':
+                        rv << '\n';
+                        break;
+                    case 'r':
+                        rv << '\r';
+                        break;
+                    case 't':
+                        rv << '\t';
+                        break;
+                    default:
+                        throw InvalidJSON(std::string("invalid quoted char '") + c + "'");
+                    case 'u': {
+                        // get unicode char.
+                        int codePoint = 0;
+                        for (size_t i = 0; i < 4; ++i) {
+                            l.get(c);
+                            codePoint = codePoint * 16 + hexval(c);
+                        }
+                        rv << UTF8(codePoint);
+                    }
+                    break;
+                }
+                break;
+            default:
+                rv << c;
+                break;
+        }
     }
-    return rv.str();
 }
 
 static inline bool
@@ -240,19 +318,53 @@ parseArray(std::istream &l, Context &&ctx)
     }
 }
 
-std::string escape(std::string i)
+std::string
+escape(std::string in)
 {
     std::ostringstream o;
-    for (auto c : i) {
-        if (c == '\"' || c == '\\')
-            o << '\\' << c;
-        else if (unsigned(c) < 32 || unsigned(c) >= 0x7f && unsigned(c) < 0xa0)
-            o << "\\u" << std::hex << unsigned(c);
-        else
-            o << c;
+    for (auto i = in.begin(); i != in.end();) {
+        int c;
+
+        switch (c = (unsigned char)*i++) {
+
+            case '\b': o << "\\b"; break;
+            case '\f': o << "\\f"; break;
+            case '\n': o << "\\n"; break;
+            case '"': o << "\\\""; break;
+            case '\\': o << "\\\\"; break;
+            case '\r': o << "\\r"; break;
+            case '\t': o << "\\t"; break;
+
+            default:
+                if (unsigned(c) < 32) {
+                    o << "\\u" << std::hex << unsigned(c);
+                } else if (c & 0x80) {
+                    // multibyte UTF-8
+                    unsigned long v = c;
+                    int count = 0;
+                    for (int mask = 0x80; mask & v; mask >>= 1) {
+                        if (mask == 0)
+                            throw InvalidJSON("malformed UTF-8 string");
+                        count++;
+                        v &= ~mask;
+                    }
+                    while (--count) {
+                        c = (unsigned char)*i++;
+                        if (c & 0xc0 != 0x80)
+                            throw InvalidJSON("illegal character in multibyte sequence");
+                        v = (v << 6) | (c & 0x3f);
+                    }
+                    o << "\\u" << std::hex << std::setfill('0') << std::setw(4) << v;
+                } else {
+                    o << (char)c;
+                }
+                break;
+        }
+
     }
     return o.str();
 }
+
 }
 
 
