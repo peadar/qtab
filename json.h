@@ -135,10 +135,10 @@ parseFloat(std::istream &l)
     return rv;
 }
 
-template <typename Integer> Integer parseNumber(std::istream &i) { return parseInt<long double>(i); }
-template <> double parseNumber<double> (std::istream &i) { return parseFloat<double>(i); }
-template <> float parseNumber<float> (std::istream &i) { return parseFloat<float>(i); }
-template <> long double parseNumber<long double> (std::istream &i) { return parseFloat<long double>(i); }
+template <typename Integer> inline Integer parseNumber(std::istream &i) { return parseInt<long double>(i); }
+template <> inline double parseNumber<double> (std::istream &i) { return parseFloat<double>(i); }
+template <> inline float parseNumber<float> (std::istream &i) { return parseFloat<float>(i); }
+template <> inline long double parseNumber<long double> (std::istream &i) { return parseFloat<long double>(i); }
 
 static inline int hexval(char c)
 {
@@ -156,7 +156,7 @@ struct UTF8 {
     UTF8(unsigned long code_) : code(code_) {}
 };
 
-std::ostream &
+inline std::ostream &
 operator<<(std::ostream &os, const UTF8 &utf)
 {
     if ((utf.code & 0x7f) == utf.code) {
@@ -318,7 +318,7 @@ parseArray(std::istream &l, Context &&ctx)
     }
 }
 
-std::string
+inline std::string
 escape(std::string in)
 {
     std::ostringstream o;
@@ -339,7 +339,7 @@ escape(std::string in)
                 if (unsigned(c) < 32) {
                     o << "\\u" << std::hex << unsigned(c);
                 } else if (c & 0x80) {
-                    // multibyte UTF-8
+                    // multibyte UTF-8: build up the unicode codepoint.
                     unsigned long v = c;
                     int count = 0;
                     for (int mask = 0x80; mask & v; mask >>= 1) {
@@ -350,7 +350,7 @@ escape(std::string in)
                     }
                     while (--count) {
                         c = (unsigned char)*i++;
-                        if (c & 0xc0 != 0x80)
+                        if ((c & 0xc0) != 0x80)
                             throw InvalidJSON("illegal character in multibyte sequence");
                         v = (v << 6) | (c & 0x3f);
                     }
